@@ -1,5 +1,5 @@
 import os
-
+import re
 import numpy as np
 import nibabel as nib
 from tqdm import tqdm
@@ -28,7 +28,7 @@ def load_data_2D(imageNames, normImage=False, categorical=False,
         quick loading and testing scripts.
     """
     affines = []
-    
+
     num = len(imageNames)
     first_case = nib.load(imageNames[0]).get_fdata(caching="unchanged")
     if len(first_case.shape) == 3:
@@ -64,3 +64,28 @@ def load_data_2D(imageNames, normImage=False, categorical=False,
         return images, affines
     else:
         return images
+
+def parse_filename(file):
+    expression = re.compile(r"case_(\d+)_week_(\d+)_slice_(\d+)\.nii")
+    result = expression.search(os.path.basename(file))
+    return int(result.group(1)), int(result.group(2)), int(result.group(3))
+
+def list_split(split):
+    folder = os.path.join(get_data_path(), 'keras_slices_' + split)
+    files = sorted(os.listdir(folder), key=parse_filename)
+    return [os.path.join(folder, filename) for filename in files]
+
+def check_patient_leakage():
+    splits = {"train": set(), "validate": set(), "test": set()}
+    patient_splits = {}
+    for split in splits:
+        for file in list_split(split):
+            patient_id, week, number = parse_filename(file)
+            if patient_id in patient_splits and patient_splits[patient_id] != split:
+                raise RuntimeError(f"patient {patient_id} is in {split} and {patient_splits[patient_id]}")
+            patient_splits[patient_id] = split
+            splits[split].add(patient_id)
+    return splits
+
+if __name__ == "__main__":
+    splits = check_patient_leakage()
