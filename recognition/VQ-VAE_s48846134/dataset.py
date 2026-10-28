@@ -3,6 +3,7 @@ import re
 import numpy as np
 import nibabel as nib
 from tqdm import tqdm
+import torch
 
 def get_data_path():
     if os.path.isdir("/home/groups/comp3710/HipMRI_Study_open/keras_slices_data"):
@@ -94,5 +95,28 @@ def check_patient_leakage():
             splits[split].add(patient_id)
     return splits
 
+def normalise(img):
+    hi = np.percentile(img, 99.5)
+    return np.clip(img / hi, 0, 1).astype(np.float32)
+
+def load_split(split):
+    cache = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+    os.makedirs(cache, exist_ok=True)
+    cache_path = os.path.join(cache, f"{split}.pt")
+    if os.path.isfile(cache_path):
+        return torch.load(cache_path, weights_only=False)
+    paths = list_split(split)
+    raw = load_data_2D(paths)
+    images = np.stack([normalise(im) for im in raw])
+    data = {
+        "images": torch.from_numpy(images)[:, None].float(),
+        "keys": [parse_filename(p) for p in paths],
+    }
+    torch.save(data, cache_path)
+    return data
+
+
 if __name__ == "__main__":
     splits = check_patient_leakage()
+    test = load_split("test")
+    print(test["images"].shape)
