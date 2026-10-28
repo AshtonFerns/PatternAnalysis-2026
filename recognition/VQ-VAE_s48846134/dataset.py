@@ -4,6 +4,7 @@ import numpy as np
 import nibabel as nib
 from tqdm import tqdm
 import torch
+from torch.utils.data import Dataset, DataLoader
 
 def get_data_path():
     if os.path.isdir("/home/groups/comp3710/HipMRI_Study_open/keras_slices_data"):
@@ -115,8 +116,26 @@ def load_split(split):
     torch.save(data, cache_path)
     return data
 
+class Slices(Dataset):
+    def __init__(self, data):
+        self.images = data["images"]
+        self.keys = data["keys"]
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, i):
+        return self.images[i], i
+
+def get_loaders(batch_size=32):
+    check_patient_leakage()
+    data = {s: load_split(s) for s in ("train", "validate", "test")}
+    return {
+        "train": DataLoader(Slices(data["train"]), batch_size=batch_size, shuffle=True, drop_last=True),
+        "validate": DataLoader(Slices(data["validate"]), batch_size=batch_size),
+        "test": DataLoader(Slices(data["test"]), batch_size=batch_size),
+    }
+
 
 if __name__ == "__main__":
-    splits = check_patient_leakage()
-    test = load_split("test")
-    print(test["images"].shape)
+    check_patient_leakage()
