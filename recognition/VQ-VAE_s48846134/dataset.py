@@ -72,8 +72,15 @@ def parse_filename(file):
 
 def list_split(split):
     folder = os.path.join(get_data_path(), 'keras_slices_' + split)
-    files = sorted(os.listdir(folder), key=parse_filename)
-    return [os.path.join(folder, filename) for filename in files]
+    paths = [os.path.join(folder, name) for name in sorted(os.listdir(folder), key=parse_filename)]
+    kept = []
+    for p in paths:
+        h, w = nib.load(p).shape[:2]
+        if (h, w) == (256, 128):
+            kept.append(p)
+        else:
+            print(f"{split}: {os.path.basename(p)} is {h}x{w} not {256}x{128}")
+    return kept
 
 def check_patient_leakage():
     splits = {"train": set(), "validate": set(), "test": set()}
