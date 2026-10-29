@@ -132,3 +132,20 @@ class VQVAE(nn.Module):
     @torch.no_grad()
     def decode(self, idx):
         return self.decoder(self.quantizer.lookup(idx))
+
+
+def ssim(x, y, reduction="mean"):
+    x, y = x.float(), y.float()
+    # gaussian with length 11, centre at 5, std of 1.5
+    g = torch.exp(-(torch.arange(11, device=x.device) - 5.0) ** 2 / (2 * 1.5 ** 2))
+    g = g / g.sum()
+    win = (g[:, None] * g[None, :])[None, None]
+    # k1, k2, and L values used in most papers
+    c1, c2 = 0.01 ** 2, 0.03 ** 2
+    mx, my = F.conv2d(x, win), F.conv2d(y, win)
+    vx = F.conv2d(x * x, win) - mx ** 2
+    vy = F.conv2d(y * y, win) - my ** 2
+    cxy = F.conv2d(x * y, win) - mx * my
+    s = ((2 * mx * my + c1) * (2 * cxy + c2)) / ((mx ** 2 + my ** 2 + c1) * (vx + vy + c2))
+    s = s.flatten(1).mean(1)
+    return s.mean() if reduction == "mean" else s
