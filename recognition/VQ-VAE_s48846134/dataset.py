@@ -117,21 +117,34 @@ def load_split(split):
     return data
 
 class Slices(Dataset):
-    def __init__(self, data):
+    def __init__(self, data, augment=False):
         self.images = data["images"]
         self.keys = data["keys"]
+        self.augment = augment
 
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, i):
-        return self.images[i], i
+        x = self.images[i]
+        if self.augment:
+            angle = (torch.rand(1) * 16 - 8) * torch.pi / 180
+            scale = torch.empty(1).uniform_(0.92, 1.08)
+            shift = torch.empty(2).uniform_(-0.04, 0.04)
+            cos, sin = angle.cos(), angle.sin()
+            theta = torch.tensor([[scale * cos, -scale * sin, shift[0]],
+                                  [scale * sin, scale * cos, shift[1]]], dtype=x.dtype)
+            grid = torch.nn.functional.affine_grid(theta[None], x[None].shape, align_corners=False)
+            x = torch.nn.functional.grid_sample(x[None], grid, align_corners=False)[0]
+            gamma = torch.empty(1).uniform_(np.log(0.8), np.log(1.25)).exp()
+            x = x.clamp(0, 1) ** gamma
+        return x, i
 
 def get_loaders(batch_size=32):
     check_patient_leakage()
     data = {s: load_split(s) for s in ("train", "validate", "test")}
     return {
-        "train": DataLoader(Slices(data["train"]), batch_size=batch_size, shuffle=True, drop_last=True),
+        "train": DataLoader(Slices(data["train"], augment=True), batch_size=batch_size, shuffle=True, drop_last=True),
         "validate": DataLoader(Slices(data["validate"]), batch_size=batch_size),
         "test": DataLoader(Slices(data["test"]), batch_size=batch_size),
     }
