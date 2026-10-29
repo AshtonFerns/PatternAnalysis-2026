@@ -210,3 +210,31 @@ class GatedPixelCNN(nn.Module):
                 logits = self(idx[:, :i + 1])[:, :, i, j].float() / temperature
                 idx[:, i, j] = torch.multinomial(logits.softmax(1), 1, generator=generator)[:, 0]
         return idx
+
+
+class VAE(nn.Module):
+    def __init__(self, channels=(32, 64, 128, 256, 256), n_res=2, z_dim=256, ch=16, hw=(256, 128)):
+        super().__init__()
+        f = 2 ** (len(channels) - 1)
+        self.shape = (ch, hw[0] // f, hw[1] // f) # 16 x 16 x 8 feature map
+        n = ch * self.shape[1] * self.shape[2]
+        self.z_dim = z_dim
+        self.encoder = Encoder(channels, n_res, ch)
+        self.to_stats = nn.Linear(n, 2 * z_dim) 
+        self.from_z = nn.Linear(z_dim, n)
+        self.decoder = Decoder(channels, n_res, ch)
+
+    def decode(self, z):
+        return self.decoder(self.from_z(z).view(-1, *self.shape))
+
+    def forward(self, x):
+        mu, logvar = self.to_stats(self.encoder(x).flatten(1)).float().chunk(2, 1)
+        logvar = logvar.clamp(-12, 8) # keep the random spread from exploding or vanishing
+        z = mu + torch.randn_like(mu) * (0.5 * logvar).exp() if self.training else mu
+        # average KL divergence over batch
+        kl = 0.5 * (mu.pow(2) + logvar.exp() - 1 - logvar).sum(1).mean()
+        return self.decode(z), kl, mu
+
+    @torch.no_grad()
+    def sample(self, n, device, generator=None):
+        return self.decode(torch.randn(n, self.z_dim, device=device, generator=generator))
