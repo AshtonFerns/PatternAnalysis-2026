@@ -10,15 +10,21 @@ from modules import VQVAE, ssim
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def vqvae_loss(model, x):
-    recon, commit, _, stats = model(x)
+def vqvae_loss(recon, x, commit):
     recon = recon.float()
     l1 = F.l1_loss(recon, x)
     loss = l1 + 0.5 * (1 - ssim(recon, x)) + commit
-    return loss, stats
+    return loss
+
+def lr_at(step, total, base, warmup=500):
+    # ramp up learning rate then smoothly drop back down
+    if step < warmup:
+        return base * (step + 1) / warmup
+    return base * (0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * (step - warmup) / max(1, total - warmup))))
 
 import argparse
 import json
+import math
 root = os.path.dirname(os.path.abspath(__file__))
 amp = dict(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda")
 # channels for each downsampling factor 
@@ -53,18 +59,24 @@ def train(cfg):
     scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
     best, best_epoch = -1.0, 0
     history = []
+    step = 0
+    total = cfg["epochs"] * len(loaders["train"])
     for epoch in range(1, cfg["epochs"] + 1):
         model.train()
         for x, _ in loaders["train"]:
             x = x.to(device)
+            for g in opt.param_groups:
+                g["lr"] = lr_at(step, total, cfg["lr"])
             opt.zero_grad(set_to_none=True)
             with torch.autocast(**amp):
-                loss, stats = vqvae_loss(model, x)
+                recon, commit, _, _ = model(x)
+            loss = vqvae_loss(recon, x, commit)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(opt)
             scaler.update()
+            step += 1
         val = evaluate(model, loaders["validate"])
         rec = {"epoch": epoch, **{f"val_{k}": v for k, v in val.items()}}
         history.append(rec)

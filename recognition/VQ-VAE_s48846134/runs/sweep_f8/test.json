@@ -1,7 +1,7 @@
 {
- "ssim": 0.5055708289146423,
- "ssim_min": 0.4549297094345093,
- "frac_ssim_above_0.6": 0.0,
- "best_epoch": 1,
- "best_val_ssim": 0.5113430023193359
+ "ssim": 0.8309311270713806,
+ "ssim_min": 0.7670725584030151,
+ "frac_ssim_above_0.6": 1.0,
+ "best_epoch": 4,
+ "best_val_ssim": 0.8037475347518921
 }

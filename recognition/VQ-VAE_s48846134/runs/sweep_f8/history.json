@@ -1,26 +1,26 @@
 [
  {
   "epoch": 1,
-  "val_ssim": 0.5113430023193359,
-  "val_ssim_min": 0.452881395816803,
-  "val_frac_ssim_above_0.6": 0.0
+  "val_ssim": 0.7171221375465393,
+  "val_ssim_min": 0.623805046081543,
+  "val_frac_ssim_above_0.6": 0.9999999403953552
  },
  {
   "epoch": 2,
-  "val_ssim": NaN,
-  "val_ssim_min": NaN,
-  "val_frac_ssim_above_0.6": 0.0
+  "val_ssim": 0.7874506115913391,
+  "val_ssim_min": 0.6999165415763855,
+  "val_frac_ssim_above_0.6": 0.9999999403953552
  },
  {
   "epoch": 3,
-  "val_ssim": NaN,
-  "val_ssim_min": NaN,
-  "val_frac_ssim_above_0.6": 0.0
+  "val_ssim": 0.8000998497009277,
+  "val_ssim_min": 0.7139879465103149,
+  "val_frac_ssim_above_0.6": 0.9999999403953552
  },
  {
   "epoch": 4,
-  "val_ssim": NaN,
-  "val_ssim_min": NaN,
-  "val_frac_ssim_above_0.6": 0.0
+  "val_ssim": 0.8037475347518921,
+  "val_ssim_min": 0.7175083160400391,
+  "val_frac_ssim_above_0.6": 0.9999999403953552
  }
 ]
