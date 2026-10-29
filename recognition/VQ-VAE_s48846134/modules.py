@@ -112,3 +112,23 @@ class VectorQuantizer(nn.Module):
             p = torch.bincount(idx, minlength=self.num_codes).float() / idx.numel()
             perplexity = torch.exp(-(p * (p + 1e-10).log()).sum())
         return q, commit, idx.view(B, h, w), {"perplexity": perplexity.item(), "restarts": restarts}
+
+
+class VQVAE(nn.Module):
+    def __init__(self, channels=(32, 64, 128, 256), n_res=2, dim=64, num_codes=512, beta=0.25):
+        super().__init__()
+        self.encoder = Encoder(channels, n_res, dim)
+        self.quantizer = VectorQuantizer(num_codes, dim, beta)
+        self.decoder = Decoder(channels, n_res, dim)
+
+    def forward(self, x):
+        q, commit, idx, stats = self.quantizer(self.encoder(x))
+        return self.decoder(q), commit, idx, stats
+
+    @torch.no_grad()
+    def encode(self, x):
+        return self.quantizer(self.encoder(x))[2]
+
+    @torch.no_grad()
+    def decode(self, idx):
+        return self.decoder(self.quantizer.lookup(idx))
