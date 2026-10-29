@@ -149,3 +149,64 @@ def ssim(x, y, reduction="mean"):
     s = ((2 * mx * my + c1) * (2 * cxy + c2)) / ((mx ** 2 + my ** 2 + c1) * (vx + vy + c2))
     s = s.flatten(1).mean(1)
     return s.mean() if reduction == "mean" else s
+
+class MaskedConv(nn.Conv2d):
+    def __init__(self, *args, mask, **kw):
+        super().__init__(*args, **kw)
+        self.register_buffer("mask", mask)
+
+    def forward(self, x):
+        return F.conv2d(x, self.weight * self.mask, self.bias, self.stride, self.padding)
+
+class GatedLayer(nn.Module):
+    def __init__(self, dim, k=5, first=False, dropout=0.0):
+        super().__init__()
+        p = k // 2 # k = 5 so each layer sees 2 rows above and 2 columns to the left
+        vm, hm = torch.ones(2 * dim, dim, p + 1, k), torch.ones(2 * dim, dim, 1, p + 1)
+        if first:
+            vm[:, :, -1] = 0 # ignore rows before the first row
+            hm[:, :, :, -1] = 0  # ignore columns before the first column
+        self.first = first
+        self.v = MaskedConv(dim, 2 * dim, (p + 1, k), padding=(p, p), mask=vm)
+        self.h = MaskedConv(dim, 2 * dim, (1, p + 1), padding=(0, p), mask=hm)
+        self.v2h = nn.Conv2d(2 * dim, 2 * dim, 1)
+        self.out = nn.Conv2d(dim, dim, 1)
+        self.drop = nn.Dropout(dropout)
+
+    @staticmethod
+    def gate(x):
+        a, b = x.chunk(2, 1)
+        return torch.tanh(a) * torch.sigmoid(b)
+
+    def forward(self, xv, xh):
+        H, W = xv.shape[-2:]
+        v = self.v(xv)[:, :, :H] # ignore rows below the image
+        h = self.h(xh)[:, :, :, :W] # ignore columns to the right
+        hout = self.drop(self.out(self.gate(h + self.v2h(v))))
+        return self.gate(v), hout if self.first else xh + hout
+
+class GatedPixelCNN(nn.Module):
+    def __init__(self, num_codes=512, dim=128, layers=18, k=5, dropout=0.1):
+        super().__init__()
+        self.num_codes = num_codes
+        # 18 layers * 2 rows each + the centre = 37 rows, which covers the 32-row code grid
+        self.embed = nn.Embedding(num_codes, dim)
+        self.layers = nn.ModuleList([GatedLayer(dim, k, first=(i == 0), dropout=dropout) for i in range(layers)])
+        self.head = nn.Sequential(nn.ReLU(), nn.Conv2d(dim, 512, 1), nn.ReLU(), nn.Conv2d(512, num_codes, 1))
+
+    def forward(self, idx):
+        # idx is integer codes (B, H, W), output is a score for each of the 512 codes at every position
+        x = self.embed(idx).permute(0, 3, 1, 2)
+        xv = xh = x
+        for layer in self.layers:
+            xv, xh = layer(xv, xh)
+        return self.head(xh)
+
+    @torch.no_grad()
+    def sample(self, n, h, w, device, temperature=1.0, generator=None):
+        idx = torch.zeros(n, h, w, dtype=torch.long, device=device)
+        for i in range(h):
+            for j in range(w):
+                logits = self(idx[:, :i + 1])[:, :, i, j].float() / temperature
+                idx[:, i, j] = torch.multinomial(logits.softmax(1), 1, generator=generator)[:, 0]
+        return idx
