@@ -1,0 +1,26 @@
+[
+ {
+  "epoch": 1,
+  "val_ssim": 0.5113430023193359,
+  "val_ssim_min": 0.452881395816803,
+  "val_frac_ssim_above_0.6": 0.0
+ },
+ {
+  "epoch": 2,
+  "val_ssim": NaN,
+  "val_ssim_min": NaN,
+  "val_frac_ssim_above_0.6": 0.0
+ },
+ {
+  "epoch": 3,
+  "val_ssim": NaN,
+  "val_ssim_min": NaN,
+  "val_frac_ssim_above_0.6": 0.0
+ },
+ {
+  "epoch": 4,
+  "val_ssim": NaN,
+  "val_ssim_min": NaN,
+  "val_frac_ssim_above_0.6": 0.0
+ }
+]
