@@ -1,8 +1,9 @@
 # Generating Realistic Prostate MRI Slices with VQ-VAE and PixelCNN
 
-## Problem and Algorithm
+## 1. Problem and Algorithm
 
-## Feasibility Report
+
+## 2. Feasibility Report
 
 ### User Need, Scope & Acceptance Criteria
 
@@ -31,3 +32,24 @@ Three VQ-VAE networks were trained for 4 epochs (took around 10 minutes each) an
 **Budget:** <5 hours of training on the RX 6600 XT with ROCm PyTorch, and <1 second to generate each slice.
 
 **Fallback:** The 2 stage network will be used instead if the solution doesn’t perform well enough, and the 4 stage network will be used if inference isn’t fast enough.
+
+
+## 3. Dependencies and Usage
+
+
+## 4. Usage
+
+
+## 5. Data, Pre-processing and Splits
+
+
+## 6. Training and Results
+
+
+## 7. Open research dilemma
+
+
+## 8. AI Usage Disclosure
+
+The Cursor IDE (with Auto selected) was used to show me how to write the code that does what I want, and troubleshoot issues whenever I hit roadblocks. 
+I copied and pasted parts of this code, but wrote most of it myself, and ensured that I understood what every part of the code was doing before each commit. 
