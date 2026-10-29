@@ -1,0 +1,10 @@
+{
+ "nll": 4.770455960874204,
+ "bits_per_code": 6.882313157532409,
+ "best_epoch": 8,
+ "params": 12501760,
+ "train_nll_at_best": 4.653496988703695,
+ "val_nll_at_best": 5.00269064469771,
+ "train_minutes": 18.190727508068086,
+ "peak_vram_gb": 2.0169856
+}

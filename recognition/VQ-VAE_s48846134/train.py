@@ -5,8 +5,8 @@ os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
 
 import torch
 import torch.nn.functional as F
-from dataset import get_loaders
-from modules import VQVAE, ssim
+from dataset import check_patient_leakage, get_loaders, load_split
+from modules import GatedPixelCNN, VQVAE, ssim
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -37,7 +37,15 @@ amp = dict(device_type=device.type, dtype=torch.float16, enabled=device.type == 
 channels_by_f = {4: (32, 64, 128), 8: (32, 64, 128, 256), 16: (32, 64, 128, 256, 256)}
 
 def build(cfg):
+    if cfg["stage"] == "prior":
+        return GatedPixelCNN(cfg["codes"], cfg["prior_dim"], cfg["prior_layers"], 5, cfg["dropout"])
     return VQVAE(channels_by_f[cfg["f"]], cfg["n_res"], cfg["dim"], cfg["codes"], cfg["beta"])
+
+def load(name):
+    ck = torch.load(os.path.join(root, "runs", name, "best.pt"), map_location=device, weights_only=False)
+    model = build(ck["cfg"]).to(device)
+    model.load_state_dict(ck["model"])
+    return model.eval(), ck["cfg"], ck
 
 @torch.no_grad()
 def evaluate(model, loader):
@@ -123,26 +131,127 @@ def train(cfg):
     json.dump(test, open(os.path.join(out, "test.json"), "w"), indent=1)
     print(f"[{cfg['name']}] TEST: " + ", ".join(f"{k}={v:.4f}" for k, v in test.items() if isinstance(v, float)))
 
+@torch.no_grad()
+def encode_all(vq, images, bs=64):
+    out = []
+    for i in range(0, len(images), bs):
+        with torch.autocast(**amp):
+            out.append(vq.encode(images[i:i + bs].float().to(device)).cpu())
+    return torch.cat(out)
+
+@torch.no_grad()
+def nll(prior, codes, bs=64):
+    prior.eval()
+    total = 0.0
+    for i in range(0, len(codes), bs):
+        z = codes[i:i + bs].to(device)
+        with torch.autocast(**amp):
+            total += F.cross_entropy(prior(z).float(), z, reduction="sum").item()
+    return total / codes.numel()
+
+def train_prior(cfg):
+    out = os.path.join(root, "runs", cfg["name"])
+    os.makedirs(out, exist_ok=True)
+    torch.manual_seed(cfg["seed"])
+    vq, vq_cfg, _ = load(cfg["vq_run"])
+    cfg["codes"] = vq_cfg["codes"]
+    check_patient_leakage()
+    codes = {s: encode_all(vq, load_split(s)["images"]) for s in ("train", "validate", "test")}
+    torch.save(codes, os.path.join(out, "codes.pt"))
+    cfg["grid"] = list(codes["train"].shape[1:])
+    prior = build(cfg).to(device)
+    n_params = sum(p.numel() for p in prior.parameters())
+    print(f"[{cfg['name']}] PixelCNN with {n_params / 1e6:.2f} M parameters, code grid {cfg['grid']}")
+    opt = torch.optim.AdamW(prior.parameters(), lr=cfg["lr"], weight_decay=1e-4)
+    scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
+    steps = len(codes["train"]) // cfg["batch"]
+    total, step, best, bad, history = cfg["epochs"] * steps, 0, float("inf"), 0, []
+    g = torch.Generator().manual_seed(cfg["seed"])
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+    t_start = time.time()
+    for epoch in range(1, cfg["epochs"] + 1):
+        prior.train()
+        t0, tot = time.time(), 0.0
+        perm = torch.randperm(len(codes["train"]), generator=g)
+        for b in range(steps):
+            z = codes["train"][perm[b * cfg["batch"]:(b + 1) * cfg["batch"]]].to(device)
+            for pg in opt.param_groups:
+                pg["lr"] = lr_at(step, total, cfg["lr"])
+            with torch.autocast(**amp):
+                loss = F.cross_entropy(prior(z).float(), z)
+            opt.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.unscale_(opt)
+            torch.nn.utils.clip_grad_norm_(prior.parameters(), 1.0)
+            scaler.step(opt)
+            scaler.update()
+            tot += loss.item()
+            step += 1
+        val = nll(prior, codes["validate"])
+        history.append({"epoch": epoch, "train_nll": tot / steps, "val_nll": val, "epoch_s": time.time() - t0})
+        tag = ""
+        if val < best:
+            best, bad, tag = val, 0, " *"
+            torch.save({"model": prior.state_dict(), "cfg": cfg, "epoch": epoch}, os.path.join(out, "best.pt"))
+        else:
+            bad += 1
+        print(f"epoch {epoch:3d} | train NLL {tot / steps:.4f} | val NLL {val:.4f} ({val / math.log(2):.3f} bits/code) | "
+              f"{history[-1]['epoch_s']:.0f}s{tag}", flush=True)
+        json.dump(history, open(os.path.join(out, "history.json"), "w"), indent=1)
+        # stop once validation has not improved for 8 epochs
+        if bad >= cfg["patience"]:
+            print(f"early stop: no validation improvement for {bad} epochs")
+            break
+    prior, _, ck = load(cfg["name"])
+    t = nll(prior, codes["test"])
+    test = {"nll": t, "bits_per_code": t / math.log(2), "best_epoch": ck["epoch"], "params": n_params,
+            "train_nll_at_best": history[ck["epoch"] - 1]["train_nll"], "val_nll_at_best": history[ck["epoch"] - 1]["val_nll"],
+            "train_minutes": (time.time() - t_start) / 60,
+            "peak_vram_gb": torch.cuda.max_memory_allocated() / 1e9 if device.type == "cuda" else None}
+    json.dump(test, open(os.path.join(out, "test.json"), "w"), indent=1)
+    print(f"[{cfg['name']}] TEST NLL {t:.4f} nats/code = {test['bits_per_code']:.3f} bits/code")
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("stage", choices=["vqvae"])
-    p.add_argument("--name", default="vqvae")
-    p.add_argument("--epochs", type=int, default=30)
+    p.add_argument("stage", choices=["vqvae", "prior"])
+    p.add_argument("--name")
+    p.add_argument("--epochs", type=int)
     p.add_argument("--f", type=int, default=8, choices=[4, 8, 16]) # downsampling factor
     p.add_argument("--n-res", type=int, default=2)
+    p.add_argument("--vq-run", default="vqvae")
     p.add_argument("--seed", type=int, default=42)
     a = p.parse_args()
-    cfg = {
-        "stage": a.stage,
-        "name": a.name,
-        "seed": a.seed,
-        "epochs": a.epochs,
-        "batch": 32,
-        "lr": 4e-4,
-        "f": a.f,
-        "n_res": a.n_res,
-        "dim": 64,
-        "codes": 512,
-        "beta": 0.25,
-    }
-    train(cfg)
+    if a.stage == "prior":
+        cfg = {
+            "stage": "prior",
+            "name": a.name or "prior",
+            "seed": a.seed,
+            "epochs": a.epochs or 60, 
+            "batch": 64,
+            "lr": 3e-4,
+            "codes": 512,
+            "prior_dim": 128,
+            "prior_layers": 18,
+            "dropout": 0.1,
+            "patience": 8,
+            "vq_run": a.vq_run,
+        }
+        print(f"device {device}: {torch.cuda.get_device_name(0) if device.type == 'cuda' else 'cpu'}")
+        train_prior(cfg)
+    else:
+        cfg = {
+            "stage": a.stage,
+            "name": a.name or "vqvae",
+            "seed": a.seed,
+            "epochs": a.epochs or 30,
+            "batch": 32,
+            "lr": 4e-4,
+            "f": a.f,
+            "n_res": a.n_res,
+            "dim": 64,
+            "codes": 512,
+            "beta": 0.25,
+        }
+        print(f"device {device}: {torch.cuda.get_device_name(0) if device.type == 'cuda' else 'cpu'}")
+        train(cfg)
