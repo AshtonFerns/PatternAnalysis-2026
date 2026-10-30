@@ -1,5 +1,6 @@
 import json
 import os
+import time
 
 os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
 
@@ -115,6 +116,38 @@ def memorisation():
     }
     json.dump(report, open(os.path.join(res_dir, "memorisation.json"), "w"), indent=1)
 
+def median_seconds(fn, warm=1, runs=3):
+    for _ in range(warm):
+        fn()
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    times = []
+    for _ in range(runs):
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        fn()
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        times.append(time.perf_counter() - t0)
+    times.sort()
+    return times[len(times) // 2]
+
+@torch.no_grad()
+def resources():
+    os.makedirs(res_dir, exist_ok=True)
+    vq, _, _ = load("vqvae")
+    prior, pcfg, _ = load("prior")
+    vae, _, _ = load("vae")
+    h, w = pcfg["grid"]
+    n = 32
+    report = {
+        "PixelCNN samples": {"seconds_per_slice": median_seconds(lambda: vq.decode(prior.sample(n, h, w, device))) / n},
+        "VAE samples": {"seconds_per_slice": median_seconds(lambda: vae.sample(n, device)) / n},
+    }
+    json.dump(report, open(os.path.join(res_dir, "resources.json"), "w"), indent=1)
+
 if __name__ == "__main__":
     main()
     memorisation()
+    resources()

@@ -1,0 +1,8 @@
+{
+ "PixelCNN samples": {
+  "seconds_per_slice": 0.6074181629378472
+ },
+ "VAE samples": {
+  "seconds_per_slice": 0.0023665360627092014
+ }
+}
