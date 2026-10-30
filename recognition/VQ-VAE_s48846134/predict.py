@@ -263,6 +263,68 @@ def memorisation_pairs():
     fig.savefig(os.path.join(fig_dir, "memorisation_pairs.png"), dpi=100)
     plt.close(fig)
 
+@torch.no_grad()
+def failures():
+    os.makedirs(fig_dir, exist_ok=True)
+    vq, _, _ = load("vqvae")
+    prior, _, _ = load("prior")
+    test = load_split("test")
+    images = test["images"].float()
+    recon, scores = [], []
+    for i in range(0, len(images), 32):
+        x = images[i:i + 32].to(device)
+        y = vq(x)[0].float()
+        recon.append(y.cpu())
+        scores.append(ssim(y, x, "none").cpu())
+    recon, scores = torch.cat(recon), torch.cat(scores)
+    worst = []
+    for i in scores.argsort().tolist():
+        if all(test["keys"][i][:2] != test["keys"][k][:2] or abs(test["keys"][i][2] - test["keys"][k][2]) >= 8 for k in worst):
+            worst.append(i)
+        if len(worst) == 3:
+            break
+    fig, axes = plt.subplots(3, 3, figsize=(6, 8))
+    for r, i in enumerate(worst):
+        for c, (img, title) in enumerate((
+            (images[i, 0], "case {} w{} s{}".format(*test["keys"][i])),
+            (recon[i, 0], f"reconstruction {scores[i]:.3f}"),
+            ((recon[i, 0] - images[i, 0]).abs() * 4, "error"),
+        )):
+            axes[r, c].imshow(show(img), cmap="gray", vmin=0, vmax=1)
+            axes[r, c].set_title(title, fontsize=8)
+            axes[r, c].axis("off")
+    fig.suptitle("Worst test reconstructions")
+    fig.tight_layout()
+    fig.savefig(os.path.join(fig_dir, "failures_reconstruction.png"), dpi=100)
+    plt.close(fig)
+    train = load_split("train")
+    train_images = train["images"].float()
+    samples = torch.load(os.path.join(res_dir, "samples.pt"), weights_only=False)["pixelcnn"].float()
+    codes = torch.cat([vq.encode(samples[i:i + 32].to(device)).cpu() for i in range(0, len(samples), 32)])
+    perplexity = []
+    for i in range(0, len(codes), 32):
+        z = codes[i:i + 32].to(device)
+        nll = torch.nn.functional.cross_entropy(prior(z).float(), z, reduction="none").flatten(1).mean(1)
+        perplexity.append(nll.exp().cpu())
+    perplexity = torch.cat(perplexity)
+    dist, idx = nearest(samples, train_images)
+    fig, axes = plt.subplots(2, 4, figsize=(8, 6))
+    for n, i in enumerate(perplexity.argsort(descending=True)[:4].tolist()):
+        r, p = divmod(n, 2)
+        c = p * 2
+        j = int(idx[i])
+        for col, img, title in (
+            (c, samples[i, 0], f"sample {i}\nperplexity {perplexity[i]:.0f}"),
+            (c + 1, train_images[j, 0], "nearest case {} w{} s{}\nRMSE {:.3f}".format(*train["keys"][j], dist[i])),
+        ):
+            axes[r, col].imshow(show(img), cmap="gray", vmin=0, vmax=1)
+            axes[r, col].set_title(title, fontsize=8)
+            axes[r, col].axis("off")
+    fig.suptitle("Least likely generated slices")
+    fig.tight_layout()
+    fig.savefig(os.path.join(fig_dir, "failures_generation.png"), dpi=100)
+    plt.close(fig)
+
 if __name__ == "__main__":
     main()
     memorisation()
@@ -270,3 +332,4 @@ if __name__ == "__main__":
     interpolation()
     memorisation_figure()
     memorisation_pairs()
+    failures()
