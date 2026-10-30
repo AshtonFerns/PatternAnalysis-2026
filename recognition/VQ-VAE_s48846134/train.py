@@ -6,7 +6,7 @@ os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
 import torch
 import torch.nn.functional as F
 from dataset import check_patient_leakage, get_loaders, load_split
-from modules import GatedPixelCNN, VQVAE, ssim
+from modules import GatedPixelCNN, VAE, VQVAE, ssim
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -39,6 +39,9 @@ channels_by_f = {4: (32, 64, 128), 8: (32, 64, 128, 256), 16: (32, 64, 128, 256,
 def build(cfg):
     if cfg["stage"] == "prior":
         return GatedPixelCNN(cfg["codes"], cfg["prior_dim"], cfg["prior_layers"], 5, cfg["dropout"])
+    if cfg["stage"] == "vae":
+        # 16x downsampling, latent vector of 256 numbers
+        return VAE(channels_by_f[16], cfg["n_res"], cfg["z_dim"])
     return VQVAE(channels_by_f[cfg["f"]], cfg["n_res"], cfg["dim"], cfg["codes"], cfg["beta"])
 
 def load(name):
@@ -54,7 +57,7 @@ def evaluate(model, loader):
     for x, _ in loader:
         x = x.to(device)
         with torch.autocast(**amp):
-            recon, _, _, _ = model(x)
+            recon = model(x)[0]
         recon = recon.float()
         scores.append(ssim(recon, x, reduction="none"))
         mses.append(F.mse_loss(recon, x, reduction="none").flatten(1).mean(1))
@@ -94,16 +97,27 @@ def train(cfg):
                 g["lr"] = lr_at(step, total, cfg["lr"])
             opt.zero_grad(set_to_none=True)
             with torch.autocast(**amp):
-                recon, commit, _, stats = model(x)
-            loss, l1, s = vqvae_loss(recon, x, commit)
+                if cfg["stage"] == "vae":
+                    recon, kl, _ = model(x)
+                else:
+                    recon, kl, _, stats = model(x)
+            if cfg["stage"] == "vae":
+                recon_f = recon.float()
+                l1 = F.l1_loss(recon_f, x)
+                s = ssim(recon_f, x)
+                # warm the KL up over 3000 steps. 0.05 matches a Laplace likelihood of scale 0.05.
+                # divide by the number of pixels so the KL is on the same scale as L1.
+                loss = l1 + 0.5 * (1 - s) + min(1, step / 3000) * cfg["kl_weight"] * kl / x[0].numel()
+                stats = {"kl": kl.item()}
+            else:
+                loss, l1, s = vqvae_loss(recon, x, kl)
+                # kl is the commitment loss here. perplexity is codes in use. restarts are dead codes replaced.
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(opt)
             scaler.update()
-            # reg is the commitment loss and perplexity is how many codebook entries are in use (512 max)
-            # restarts is how many dead codes were replaced each step
-            row = {"loss": loss.item(), "l1": l1.item(), "ssim": s.item(), "reg": commit.item(),
+            row = {"loss": loss.item(), "l1": l1.item(), "ssim": s.item(), "reg": kl.item(),
                    "grad_norm": grad_norm.item() if torch.isfinite(grad_norm) else 0.0, **stats}
             for k, v in row.items():
                 sums[k] = sums.get(k, 0) + v
@@ -120,8 +134,9 @@ def train(cfg):
                 {"model": model.state_dict(), "cfg": cfg, "epoch": epoch},
                 os.path.join(out, "best.pt"),
             )
+        extra = f"perplexity {rec['train_perplexity']:.0f}" if cfg["stage"] == "vqvae" else f"KL {rec['train_kl']:.0f}"
         print(f"epoch {epoch:3d} | loss {rec['train_loss']:.4f} | val SSIM {val['ssim']:.4f} PSNR {val['psnr']:.2f} | "
-              f"perplexity {rec['train_perplexity']:.0f} | {rec['epoch_s']:.0f}s{tag}", flush=True)
+              f"{extra} | {rec['epoch_s']:.0f}s{tag}", flush=True)
         json.dump(history, open(os.path.join(out, "history.json"), "w"), indent=1)
     ck = torch.load(os.path.join(out, "best.pt"), map_location=device, weights_only=False)
     model.load_state_dict(ck["model"])
@@ -214,7 +229,7 @@ def train_prior(cfg):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("stage", choices=["vqvae", "prior"])
+    p.add_argument("stage", choices=["vqvae", "prior", "vae"])
     p.add_argument("--name")
     p.add_argument("--epochs", type=int)
     p.add_argument("--f", type=int, default=8, choices=[4, 8, 16]) # downsampling factor
@@ -239,6 +254,20 @@ if __name__ == "__main__":
         }
         print(f"device {device}: {torch.cuda.get_device_name(0) if device.type == 'cuda' else 'cpu'}")
         train_prior(cfg)
+    elif a.stage == "vae":
+        cfg = {
+            "stage": "vae",
+            "name": a.name or "vae",
+            "seed": a.seed,
+            "epochs": a.epochs or 30,
+            "batch": 32,
+            "lr": 4e-4,
+            "n_res": a.n_res,
+            "z_dim": 256,
+            "kl_weight": 0.05,
+        }
+        print(f"device {device}: {torch.cuda.get_device_name(0) if device.type == 'cuda' else 'cpu'}")
+        train(cfg)
     else:
         cfg = {
             "stage": a.stage,
