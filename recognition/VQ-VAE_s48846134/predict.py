@@ -1,3 +1,4 @@
+import json
 import os
 
 os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
@@ -12,6 +13,7 @@ from modules import ssim
 from train import device, load, root
 
 fig_dir = os.path.join(root, "figures")
+res_dir = os.path.join(root, "results")
 
 def show(img):
     return img.detach().float().cpu().numpy()
@@ -76,5 +78,43 @@ def main():
         ("VAE, random latent", [x[0] for x in random_vae]),
     ], os.path.join(fig_dir, "samples.png"))
 
+@torch.no_grad()
+def nearest_rmse(queries, bank, chunk=64):
+    bank = bank.flatten(1).float().to(device)
+    bank_sq = bank.pow(2).sum(1)
+    out = []
+    for i in range(0, len(queries), chunk):
+        q = queries[i:i + chunk].flatten(1).float().to(device)
+        dist2 = q.pow(2).sum(1, keepdim=True) - 2 * q @ bank.t() + bank_sq
+        out.append((dist2.min(1).values.clamp_min(0) / bank.shape[1]).sqrt().cpu())
+    return torch.cat(out)
+
+def summarise(dist):
+    return {"median": dist.median().item(), "minimum": dist.min().item()}
+
+@torch.no_grad()
+def memorisation():
+    os.makedirs(res_dir, exist_ok=True)
+    vq, _, _ = load("vqvae")
+    prior, pcfg, _ = load("prior")
+    vae, _, _ = load("vae")
+    h, w = pcfg["grid"]
+    train = load_split("train")["images"].float()
+    test = load_split("test")["images"].float()
+    pixelcnn, vae_imgs = [], []
+    for seed in range(8):
+        g = torch.Generator(device=device).manual_seed(seed)
+        pixelcnn.append(vq.decode(prior.sample(125, h, w, device, generator=g)).cpu())
+        vae_imgs.append(vae.sample(125, device, g).cpu())
+    saved = {"pixelcnn": torch.cat(pixelcnn), "vae": torch.cat(vae_imgs)}
+    torch.save(saved, os.path.join(res_dir, "samples.pt"))
+    report = {
+        "real test patients": summarise(nearest_rmse(test, train)),
+        "PixelCNN samples": summarise(nearest_rmse(saved["pixelcnn"].float(), train)),
+        "VAE samples": summarise(nearest_rmse(saved["vae"].float(), train)),
+    }
+    json.dump(report, open(os.path.join(res_dir, "memorisation.json"), "w"), indent=1)
+
 if __name__ == "__main__":
     main()
+    memorisation()

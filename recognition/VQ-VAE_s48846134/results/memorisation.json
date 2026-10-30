@@ -1,0 +1,14 @@
+{
+ "real test patients": {
+  "median": 0.1690765768289566,
+  "minimum": 0.13630744814872742
+ },
+ "PixelCNN samples": {
+  "median": 0.17653168737888336,
+  "minimum": 0.1123470738530159
+ },
+ "VAE samples": {
+  "median": 0.21120823919773102,
+  "minimum": 0.16141115128993988
+ }
+}
