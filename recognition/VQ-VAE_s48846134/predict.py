@@ -179,8 +179,57 @@ def interpolation():
     fig.savefig(os.path.join(fig_dir, "interpolation.png"), dpi=100)
     plt.close(fig)
 
+def same_patient_rmse(images, patients, n=500):
+    pick = torch.randperm(len(images), generator=torch.Generator().manual_seed(2))[:n]
+    bank = images.flatten(1).float().to(device)
+    bank_sq = bank.pow(2).sum(1)
+    out = []
+    for i in range(0, n, 64):
+        idx = pick[i:i + 64]
+        q = images[idx].flatten(1).float().to(device)
+        dist2 = q.pow(2).sum(1, keepdim=True) - 2 * q @ bank.t() + bank_sq
+        forbid = (patients[idx, None] != patients[None]) | (idx[:, None] == torch.arange(len(patients)))
+        out.append((dist2.masked_fill(forbid.to(device), float("inf")).min(1).values.clamp_min(0) / bank.shape[1]).sqrt().cpu())
+    return torch.cat(out)
+
+@torch.no_grad()
+def memorisation_figure():
+    os.makedirs(fig_dir, exist_ok=True)
+    vq, _, _ = load("vqvae")
+    train = load_split("train")
+    test = load_split("test")["images"].float()
+    images = train["images"].float()
+    saved = torch.load(os.path.join(res_dir, "samples.pt"), weights_only=False)
+    recon = torch.cat([vq(test[i:i + 32].to(device))[0].cpu() for i in range(0, len(test), 32)])
+    patients = torch.tensor([k[0] for k in train["keys"]])
+    groups = (
+        ("Final generated samples", nearest_rmse(saved["pixelcnn"].float(), images)),
+        ("VAE samples", nearest_rmse(saved["vae"].float(), images)),
+        ("test slices", nearest_rmse(test, images)),
+        ("VQ-VAE reconstructions", nearest_rmse(recon, images)),
+        ("train slice to same patient", same_patient_rmse(images, patients)),
+    )
+    fig, ax = plt.subplots(figsize=(8, 4))
+    xs = torch.linspace(0, 0.35, 400)
+    bandwidth = 0.005
+    for name, dist in groups:
+        z = (xs[:, None] - dist.float()[None, :]) / bandwidth
+        y = torch.exp(-0.5 * z.pow(2)).mean(1) / (bandwidth * (2 * torch.pi) ** 0.5)
+        line, = ax.plot(xs.numpy(), y.numpy(), linewidth=1.6, label=name)
+        ax.fill_between(xs.numpy(), y.numpy(), color=line.get_color(), alpha=0.15)
+    ax.axvline(groups[2][1].median().item() / 2, color="black", linestyle="--", linewidth=1, label="half the test median")
+    ax.set_xlim(0, 0.35)
+    ax.set_ylim(0, None)
+    ax.set_xlabel("RMSE to the nearest training slice")
+    ax.set_ylabel("density")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(fig_dir, "memorisation_distances.png"), dpi=100)
+    plt.close(fig)
+
 if __name__ == "__main__":
     main()
     memorisation()
     resources()
     interpolation()
+    memorisation_figure()
