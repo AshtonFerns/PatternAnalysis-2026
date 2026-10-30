@@ -2,6 +2,9 @@ import json
 import os
 import time
 
+import numpy as np
+from scipy.linalg import sqrtm
+
 os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
 
 import matplotlib
@@ -325,6 +328,43 @@ def failures():
     fig.savefig(os.path.join(fig_dir, "failures_generation.png"), dpi=100)
     plt.close(fig)
 
+@torch.no_grad()
+def inception_features(net, imgs):
+    out = []
+    for i in range(0, len(imgs), 32):
+        x = (imgs[i:i + 32].float().clamp(0, 1) * 255).round().to(torch.uint8)
+        out.append(net(x.repeat(1, 3, 1, 1).to(device)).double().cpu())
+    return torch.cat(out)
+
+def frechet(a, b):
+    a, b = a.numpy(), b.numpy()
+    cov_a, cov_b = np.cov(a, rowvar=False), np.cov(b, rowvar=False)
+    diff = a.mean(0) - b.mean(0)
+    return float((diff ** 2).sum() + np.trace(cov_a + cov_b - 2 * np.real(sqrtm(cov_a @ cov_b))))
+
+@torch.no_grad()
+def distribution():
+    os.makedirs(res_dir, exist_ok=True)
+    from torchmetrics.image.fid import FrechetInceptionDistance
+    net = FrechetInceptionDistance(feature=2048).inception.to(device).eval()
+    vq, _, _ = load("vqvae")
+    train = load_split("train")["images"].float()
+    test = load_split("test")["images"].float()
+    saved = torch.load(os.path.join(res_dir, "samples.pt"), weights_only=False)
+    reference = train[torch.randperm(len(train), generator=torch.Generator().manual_seed(1))[:2000]]
+    ref = inception_features(net, reference)
+    recon = torch.cat([vq(test[i:i + 32].to(device))[0].cpu() for i in range(0, len(test), 32)])
+    groups = (
+        ("test slices", test),
+        ("VQ-VAE reconstructions", recon),
+        ("Final generated samples", saved["pixelcnn"].float()),
+        ("VAE samples", saved["vae"].float()),
+    )
+    report = {"reference": {"split": "train", "n": len(reference)}}
+    for name, imgs in groups:
+        report[name] = {"n": len(imgs), "fid": frechet(inception_features(net, imgs), ref)}
+    json.dump(report, open(os.path.join(res_dir, "fid.json"), "w"), indent=1)
+
 if __name__ == "__main__":
     main()
     memorisation()
@@ -333,3 +373,4 @@ if __name__ == "__main__":
     memorisation_figure()
     memorisation_pairs()
     failures()
+    distribution()

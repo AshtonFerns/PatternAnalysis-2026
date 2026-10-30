@@ -1,0 +1,22 @@
+{
+ "reference": {
+  "split": "train",
+  "n": 2000
+ },
+ "test slices": {
+  "n": 540,
+  "fid": 63.827423973408266
+ },
+ "VQ-VAE reconstructions": {
+  "n": 540,
+  "fid": 166.6927066155289
+ },
+ "Final generated samples": {
+  "n": 1000,
+  "fid": 145.96242838733292
+ },
+ "VAE samples": {
+  "n": 1000,
+  "fid": 358.8985836481464
+ }
+}
