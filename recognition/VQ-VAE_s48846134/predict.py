@@ -80,15 +80,20 @@ def main():
     ], os.path.join(fig_dir, "samples.png"))
 
 @torch.no_grad()
-def nearest_rmse(queries, bank, chunk=64):
+def nearest(queries, bank, chunk=64):
     bank = bank.flatten(1).float().to(device)
     bank_sq = bank.pow(2).sum(1)
-    out = []
+    dist, idx = [], []
     for i in range(0, len(queries), chunk):
         q = queries[i:i + chunk].flatten(1).float().to(device)
         dist2 = q.pow(2).sum(1, keepdim=True) - 2 * q @ bank.t() + bank_sq
-        out.append((dist2.min(1).values.clamp_min(0) / bank.shape[1]).sqrt().cpu())
-    return torch.cat(out)
+        v, j = dist2.min(1)
+        dist.append((v.clamp_min(0) / bank.shape[1]).sqrt().cpu())
+        idx.append(j.cpu())
+    return torch.cat(dist), torch.cat(idx)
+
+def nearest_rmse(queries, bank, chunk=64):
+    return nearest(queries, bank, chunk)[0]
 
 def summarise(dist):
     return {"median": dist.median().item(), "minimum": dist.min().item()}
@@ -201,6 +206,11 @@ def memorisation_figure():
     images = train["images"].float()
     saved = torch.load(os.path.join(res_dir, "samples.pt"), weights_only=False)
     recon = torch.cat([vq(test[i:i + 32].to(device))[0].cpu() for i in range(0, len(test), 32)])
+    self_rmse = []
+    for i in range(0, len(images), 32):
+        x = images[i:i + 32].to(device)
+        y = vq(x)[0].float()
+        self_rmse.append((y - x.float()).flatten(1).pow(2).mean(1).sqrt().cpu())
     patients = torch.tensor([k[0] for k in train["keys"]])
     groups = (
         ("Final generated samples", nearest_rmse(saved["pixelcnn"].float(), images)),
@@ -208,6 +218,7 @@ def memorisation_figure():
         ("test slices", nearest_rmse(test, images)),
         ("VQ-VAE reconstructions", nearest_rmse(recon, images)),
         ("train slice to same patient", same_patient_rmse(images, patients)),
+        ("train slice to reconstruction", torch.cat(self_rmse)),
     )
     fig, ax = plt.subplots(figsize=(8, 4))
     xs = torch.linspace(0, 0.35, 400)
@@ -227,9 +238,35 @@ def memorisation_figure():
     fig.savefig(os.path.join(fig_dir, "memorisation_distances.png"), dpi=100)
     plt.close(fig)
 
+def memorisation_pairs():
+    os.makedirs(fig_dir, exist_ok=True)
+    train = load_split("train")
+    images = train["images"].float()
+    samples = torch.load(os.path.join(res_dir, "samples.pt"), weights_only=False)["pixelcnn"].float()
+    dist, idx = nearest(samples, images)
+    chosen = list(range(8)) + dist.argsort()[:4].tolist()
+    fig, axes = plt.subplots(3, 8, figsize=(14, 8))
+    for n, i in enumerate(chosen):
+        r, p = divmod(n, 4)
+        c = p * 2
+        neighbour = images[idx[i]:idx[i] + 1]
+        score = ssim(samples[i:i + 1], neighbour, "none").item()
+        for col, img, title in (
+            (c, samples[i, 0], f"sample {i}"),
+            (c + 1, neighbour[0, 0], "nearest case {} w{} s{}\nRMSE {:.3f} SSIM {:.2f}".format(*train["keys"][idx[i]], dist[i], score)),
+        ):
+            axes[r, col].imshow(show(img), cmap="gray", vmin=0, vmax=1)
+            axes[r, col].set_title(title, fontsize=7)
+            axes[r, col].axis("off")
+    fig.suptitle("Generated slice vs nearest training slice")
+    fig.tight_layout()
+    fig.savefig(os.path.join(fig_dir, "memorisation_pairs.png"), dpi=100)
+    plt.close(fig)
+
 if __name__ == "__main__":
     main()
     memorisation()
     resources()
     interpolation()
     memorisation_figure()
+    memorisation_pairs()
