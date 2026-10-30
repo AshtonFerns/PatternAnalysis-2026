@@ -16,12 +16,15 @@ fig_dir = os.path.join(root, "figures")
 def show(img):
     return img.detach().float().cpu().numpy()
 
-def save_grid(imgs, path, title):
-    fig, axes = plt.subplots(2, 8, figsize=(12, 5))
-    for ax, img in zip(axes.flat, imgs):
-        ax.imshow(show(img), cmap="gray", vmin=0, vmax=1)
-        ax.axis("off")
-    fig.suptitle(title)
+def save_rows(rows, path):
+    n = len(rows[0][1])
+    fig, axes = plt.subplots(len(rows), n, figsize=(1.5 * n, 2.6 * len(rows)))
+    for r, (title, imgs) in enumerate(rows):
+        for c, img in enumerate(imgs):
+            axes[r, c].imshow(show(img), cmap="gray", vmin=0, vmax=1)
+            axes[r, c].set_xticks([])
+            axes[r, c].set_yticks([])
+        axes[r, 0].set_ylabel(title, fontsize=9)
     fig.tight_layout()
     fig.savefig(path, dpi=100)
     plt.close(fig)
@@ -52,12 +55,26 @@ def main():
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, "test_reconstructions.png"), dpi=100)
     plt.close(fig)
-    g = torch.Generator(device=device).manual_seed(0)
-    codes = prior.sample(16, h, w, device, generator=g)
-    new = vq.decode(codes).cpu()
-    vae_new = vae.sample(16, device, torch.Generator(device=device).manual_seed(0)).cpu()
-    save_grid([x[0] for x in new], os.path.join(fig_dir, "samples_vqvae_seed0.png"), "VQ-VAE + PixelCNN, seed 0")
-    save_grid([x[0] for x in vae_new], os.path.join(fig_dir, "samples_vae.png"), "VAE baseline, z ~ N(0, I)")
+    n = 8
+    train = load_split("train")
+    # sample slices from random patients evenly distributed through a 3D scan
+    levels = torch.linspace(0, 59, n).round().long().tolist()
+    patients = sorted({k[0] for k in train["keys"]})
+    chosen = [patients[i] for i in torch.randperm(len(patients), generator=torch.Generator().manual_seed(0))[:n]]
+    real = []
+    for patient, level in zip(chosen, levels):
+        i = next(i for i, k in enumerate(train["keys"]) if k[0] == patient and k[2] == int(level))
+        real.append(train["images"][i, 0])
+    pixelcnn = vq.decode(prior.sample(n, h, w, device, generator=torch.Generator(device=device).manual_seed(0))).cpu()
+    random_codes = torch.randint(0, prior.num_codes, (n, h, w), generator=torch.Generator().manual_seed(0))
+    random_vq = vq.decode(random_codes.to(device)).cpu()
+    random_vae = vae.sample(n, device, torch.Generator(device=device).manual_seed(0)).cpu()
+    save_rows([
+        ("Real slices", real),
+        ("VQ-VAE + PixelCNN", [x[0] for x in pixelcnn]),
+        ("VQ-VAE, random codes", [x[0] for x in random_vq]),
+        ("VAE, random latent", [x[0] for x in random_vae]),
+    ], os.path.join(fig_dir, "samples.png"))
 
 if __name__ == "__main__":
     main()
