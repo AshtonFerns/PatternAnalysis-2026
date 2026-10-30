@@ -18,13 +18,17 @@ def vqvae_loss(recon, x, commit):
     return loss, l1, s
 
 def psnr(a, b):
+    # per-image squared error
     mse = F.mse_loss(a.float(), b.float(), reduction="none").flatten(1).mean(1).clamp_min(1e-10)
+    # peak value in the formula is 1 because the slices sit between 0 and 1
     return 10 * torch.log10(1 / mse)
 
 def lr_at(step, total, base, warmup=500):
     # ramp up learning rate then smoothly drop back down
     if step < warmup:
         return base * (step + 1) / warmup
+    # cosine falloff toward 5 percent of the base rate
+    # the max keeps the divisor at least 1 when the run is shorter than the warmup
     return base * (0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * (step - warmup) / max(1, total - warmup))))
 
 import argparse
@@ -45,6 +49,7 @@ def build(cfg):
     return VQVAE(channels_by_f[cfg["f"]], cfg["n_res"], cfg["dim"], cfg["codes"], cfg["beta"])
 
 def load(name):
+    # load the weights and their config
     ck = torch.load(os.path.join(root, "runs", name, "best.pt"), map_location=device, weights_only=False)
     model = build(ck["cfg"]).to(device)
     model.load_state_dict(ck["model"])
@@ -59,6 +64,7 @@ def evaluate(model, loader):
         with torch.autocast(**amp):
             recon = model(x)[0]
         recon = recon.float()
+        # keep one score per slice for the worst case and the fraction above 0.6
         scores.append(ssim(recon, x, reduction="none"))
         mses.append(F.mse_loss(recon, x, reduction="none").flatten(1).mean(1))
         psnrs.append(psnr(recon, x))
@@ -84,8 +90,10 @@ def train(cfg):
     best, best_epoch = -1.0, 0
     history = []
     step = 0
+    # one step per optimiser update
     total = cfg["epochs"] * len(loaders["train"])
     if device.type == "cuda":
+        # start the peak memory measurement from the training loop
         torch.cuda.reset_peak_memory_stats()
     t_start = time.time()
     for epoch in range(1, cfg["epochs"] + 1):
@@ -95,6 +103,7 @@ def train(cfg):
             x = x.to(device)
             for g in opt.param_groups:
                 g["lr"] = lr_at(step, total, cfg["lr"])
+            # drop the stored gradients
             opt.zero_grad(set_to_none=True)
             with torch.autocast(**amp):
                 if cfg["stage"] == "vae":
@@ -118,6 +127,7 @@ def train(cfg):
             scaler.step(opt)
             scaler.update()
             row = {"loss": loss.item(), "l1": l1.item(), "ssim": s.item(), "reg": kl.item(),
+                   # store non-finite norms as zero for history plotting
                    "grad_norm": grad_norm.item() if torch.isfinite(grad_norm) else 0.0, **stats}
             for k, v in row.items():
                 sums[k] = sums.get(k, 0) + v
@@ -129,6 +139,7 @@ def train(cfg):
         history.append(rec)
         tag = ""
         if val["ssim"] > best:
+            # keep the weights with the best validation structure score
             best, best_epoch, tag = val["ssim"], epoch, " *"
             torch.save(
                 {"model": model.state_dict(), "cfg": cfg, "epoch": epoch},
@@ -156,6 +167,7 @@ def encode_all(vq, images, bs=64):
 
 @torch.no_grad()
 def nll(prior, codes, bs=64):
+    # negative log likelihood in nats averaged over every code position
     prior.eval()
     total = 0.0
     for i in range(0, len(codes), bs):
@@ -171,6 +183,7 @@ def train_prior(cfg):
     vq, vq_cfg, _ = load(cfg["vq_run"])
     cfg["codes"] = vq_cfg["codes"]
     check_patient_leakage()
+    # train prior on frozen code grids from VQ-VAE
     codes = {s: encode_all(vq, load_split(s)["images"]) for s in ("train", "validate", "test")}
     torch.save(codes, os.path.join(out, "codes.pt"))
     cfg["grid"] = list(codes["train"].shape[1:])
@@ -180,7 +193,9 @@ def train_prior(cfg):
     opt = torch.optim.AdamW(prior.parameters(), lr=cfg["lr"], weight_decay=1e-4)
     scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
     steps = len(codes["train"]) // cfg["batch"]
+    # start with loss as infinite
     total, step, best, bad, history = cfg["epochs"] * steps, 0, float("inf"), 0, []
+    # separate generator so this does not affect the global random stream
     g = torch.Generator().manual_seed(cfg["seed"])
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
@@ -221,6 +236,7 @@ def train_prior(cfg):
     prior, _, ck = load(cfg["name"])
     t = nll(prior, codes["test"])
     test = {"nll": t, "bits_per_code": t / math.log(2), "best_epoch": ck["epoch"], "params": n_params,
+            # epoch numbers start at 1 and the history list starts at 0
             "train_nll_at_best": history[ck["epoch"] - 1]["train_nll"], "val_nll_at_best": history[ck["epoch"] - 1]["val_nll"],
             "train_minutes": (time.time() - t_start) / 60,
             "peak_vram_gb": torch.cuda.max_memory_allocated() / 1e9 if device.type == "cuda" else None}
@@ -246,10 +262,10 @@ if __name__ == "__main__":
             "batch": 64,
             "lr": 3e-4,
             "codes": 512,
-            "prior_dim": 128,
+            "prior_dim": 128, # width of each gated layer
             "prior_layers": 18,
             "dropout": 0.1,
-            "patience": 8,
+            "patience": 8, # consecutive epochs allowed with no loss improvement
             "vq_run": a.vq_run,
         }
         print(f"device {device}: {torch.cuda.get_device_name(0) if device.type == 'cuda' else 'cpu'}")
@@ -263,7 +279,7 @@ if __name__ == "__main__":
             "batch": 32,
             "lr": 4e-4,
             "n_res": a.n_res,
-            "z_dim": 256,
+            "z_dim": 256, # length of the gaussian vector
             "kl_weight": 0.05,
         }
         print(f"device {device}: {torch.cuda.get_device_name(0) if device.type == 'cuda' else 'cpu'}")
@@ -278,9 +294,9 @@ if __name__ == "__main__":
             "lr": 4e-4,
             "f": a.f,
             "n_res": a.n_res,
-            "dim": 64,
-            "codes": 512,
-            "beta": 0.25,
+            "dim": 64, # width of each code vector
+            "codes": 512, # number of vectors in the codebook
+            "beta": 0.25, # weight on the commitment term
         }
         print(f"device {device}: {torch.cuda.get_device_name(0) if device.type == 'cuda' else 'cpu'}")
         train(cfg)

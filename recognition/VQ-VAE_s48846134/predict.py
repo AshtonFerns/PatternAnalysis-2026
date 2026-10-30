@@ -5,9 +5,11 @@ import time
 import numpy as np
 from scipy.linalg import sqrtm
 
+# needed for my AMD GPU
 os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
 
 import matplotlib
+# draw straight to files
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
@@ -27,6 +29,7 @@ def save_rows(rows, path):
     fig, axes = plt.subplots(len(rows), n, figsize=(1.5 * n, 2.6 * len(rows)))
     for r, (title, imgs) in enumerate(rows):
         for c, img in enumerate(imgs):
+            # lock the grey scale so a dark slice is not stretched to look bright
             axes[r, c].imshow(show(img), cmap="gray", vmin=0, vmax=1)
             axes[r, c].set_xticks([])
             axes[r, c].set_yticks([])
@@ -44,6 +47,7 @@ def main():
     h, w = pcfg["grid"]
     test = load_split("test")
     images = test["images"].float()
+    # six slices spread out through the test list
     pick = torch.linspace(5, len(images) - 6, 6).long()
     recon_vq = torch.cat([vq(images[i:i + 1].to(device))[0].cpu() for i in pick])
     recon_vae = torch.cat([vae(images[i:i + 1].to(device))[0].cpu() for i in pick])
@@ -64,11 +68,13 @@ def main():
     n = 8
     train = load_split("train")
     # sample slices from random patients evenly distributed through a 3D scan
+    # slice numbers are from 0 to 59
     levels = torch.linspace(0, 59, n).round().long().tolist()
     patients = sorted({k[0] for k in train["keys"]})
     chosen = [patients[i] for i in torch.randperm(len(patients), generator=torch.Generator().manual_seed(0))[:n]]
     real = []
     for patient, level in zip(chosen, levels):
+        # gets the slice at the chosen depth
         i = next(i for i, k in enumerate(train["keys"]) if k[0] == patient and k[2] == int(level))
         real.append(train["images"][i, 0])
     pixelcnn = vq.decode(prior.sample(n, h, w, device, generator=torch.Generator(device=device).manual_seed(0))).cpu()
@@ -89,8 +95,10 @@ def nearest(queries, bank, chunk=64):
     dist, idx = [], []
     for i in range(0, len(queries), chunk):
         q = queries[i:i + chunk].flatten(1).float().to(device)
+        # squared distance as the two squared lengths minus twice the dot product
         dist2 = q.pow(2).sum(1, keepdim=True) - 2 * q @ bank.t() + bank_sq
         v, j = dist2.min(1)
+        # root mean squared error (RMSE)
         dist.append((v.clamp_min(0) / bank.shape[1]).sqrt().cpu())
         idx.append(j.cpu())
     return torch.cat(dist), torch.cat(idx)
@@ -113,6 +121,7 @@ def memorisation():
     pixelcnn, vae_imgs = [], []
     for seed in range(8):
         g = torch.Generator(device=device).manual_seed(seed)
+        # eight passes of 125 for 1000 samples total
         pixelcnn.append(vq.decode(prior.sample(125, h, w, device, generator=g)).cpu())
         vae_imgs.append(vae.sample(125, device, g).cpu())
     saved = {"pixelcnn": torch.cat(pixelcnn), "vae": torch.cat(vae_imgs)}
@@ -125,6 +134,7 @@ def memorisation():
     json.dump(report, open(os.path.join(res_dir, "memorisation.json"), "w"), indent=1)
 
 def median_seconds(fn, warm=1, runs=3):
+    # the warmup pass is untimed so startup does not count
     for _ in range(warm):
         fn()
     if device.type == "cuda":
@@ -136,6 +146,7 @@ def median_seconds(fn, warm=1, runs=3):
         t0 = time.perf_counter()
         fn()
         if device.type == "cuda":
+            # stop the clock when the GPU has finished
             torch.cuda.synchronize()
         times.append(time.perf_counter() - t0)
     times.sort()
@@ -149,6 +160,7 @@ def resources():
     vae, _, _ = load("vae")
     h, w = pcfg["grid"]
     n = 32
+    # time a batch and divide by the number of slices to get seconds per slice
     report = {
         "PixelCNN samples": {"seconds_per_slice": median_seconds(lambda: vq.decode(prior.sample(n, h, w, device))) / n},
         "VAE samples": {"seconds_per_slice": median_seconds(lambda: vae.sample(n, device)) / n},
@@ -162,12 +174,15 @@ def interpolation():
     vae, _, _ = load("vae")
     test = load_split("test")
     images = test["images"].float()
+    # same depth in the scan for two different patients
     a = next(i for i, k in enumerate(test["keys"]) if k[0] == test["keys"][0][0] and k[2] == 30)
     b = next(i for i, k in enumerate(test["keys"]) if k[0] != test["keys"][0][0] and k[2] == 30)
     xa, xb = images[a:a + 1].to(device), images[b:b + 1].to(device)
     steps = torch.linspace(0, 1, 8, device=device)
     za, zb = vq.encoder(xa), vq.encoder(xb)
+    # blend the encoder features and then snap each step onto a code
     vq_row = vq.decoder(vq.quantizer(torch.cat([(1 - t) * za + t * zb for t in steps]))[0])
+    # index 2 on the VAE output is the gaussian mean
     ma, mb = vae(xa)[2], vae(xb)[2]
     vae_row = vae.decode(torch.cat([(1 - t) * ma + t * mb for t in steps]))
     fig, axes = plt.subplots(2, 10, figsize=(14, 6))
@@ -197,6 +212,7 @@ def same_patient_rmse(images, patients, n=500):
         q = images[idx].flatten(1).float().to(device)
         dist2 = q.pow(2).sum(1, keepdim=True) - 2 * q @ bank.t() + bank_sq
         forbid = (patients[idx, None] != patients[None]) | (idx[:, None] == torch.arange(len(patients)))
+        # blocked columns become infinite so the minimum skips them
         out.append((dist2.masked_fill(forbid.to(device), float("inf")).min(1).values.clamp_min(0) / bank.shape[1]).sqrt().cpu())
     return torch.cat(out)
 
@@ -213,6 +229,7 @@ def memorisation_figure():
     for i in range(0, len(images), 32):
         x = images[i:i + 32].to(device)
         y = vq(x)[0].float()
+        # root mean squared error of each training slice against its own reconstruction
         self_rmse.append((y - x.float()).flatten(1).pow(2).mean(1).sqrt().cpu())
     patients = torch.tensor([k[0] for k in train["keys"]])
     groups = (
@@ -224,8 +241,9 @@ def memorisation_figure():
         ("train slice to reconstruction", torch.cat(self_rmse)),
     )
     fig, ax = plt.subplots(figsize=(8, 4))
+    # error range the curves are drawn over
     xs = torch.linspace(0, 0.35, 400)
-    bandwidth = 0.005
+    bandwidth = 0.005  # smoothing width
     for name, dist in groups:
         z = (xs[:, None] - dist.float()[None, :]) / bandwidth
         y = torch.exp(-0.5 * z.pow(2)).mean(1) / (bandwidth * (2 * torch.pi) ** 0.5)
@@ -247,6 +265,7 @@ def memorisation_pairs():
     images = train["images"].float()
     samples = torch.load(os.path.join(res_dir, "samples.pt"), weights_only=False)["pixelcnn"].float()
     dist, idx = nearest(samples, images)
+    # first eight saved samples plus the four closest to a training slice
     chosen = list(range(8)) + dist.argsort()[:4].tolist()
     fig, axes = plt.subplots(3, 8, figsize=(14, 8))
     for n, i in enumerate(chosen):
@@ -282,6 +301,7 @@ def failures():
     recon, scores = torch.cat(recon), torch.cat(scores)
     worst = []
     for i in scores.argsort().tolist():
+        # same patient and week must be at least 8 slices away to count as a new failure
         if all(test["keys"][i][:2] != test["keys"][k][:2] or abs(test["keys"][i][2] - test["keys"][k][2]) >= 8 for k in worst):
             worst.append(i)
         if len(worst) == 3:
@@ -291,6 +311,7 @@ def failures():
         for c, (img, title) in enumerate((
             (images[i, 0], "case {} w{} s{}".format(*test["keys"][i])),
             (recon[i, 0], f"reconstruction {scores[i]:.3f}"),
+            # stretch the absolute error so faint differences show on a 0 to 1 display
             ((recon[i, 0] - images[i, 0]).abs() * 4, "error"),
         )):
             axes[r, c].imshow(show(img), cmap="gray", vmin=0, vmax=1)
@@ -303,11 +324,14 @@ def failures():
     train = load_split("train")
     train_images = train["images"].float()
     samples = torch.load(os.path.join(res_dir, "samples.pt"), weights_only=False)["pixelcnn"].float()
+    # encodes the samples into code indices
     codes = torch.cat([vq.encode(samples[i:i + 32].to(device)).cpu() for i in range(0, len(samples), 32)])
     perplexity = []
     for i in range(0, len(codes), 32):
         z = codes[i:i + 32].to(device)
+        # average code loss over the grid
         nll = torch.nn.functional.cross_entropy(prior(z).float(), z, reduction="none").flatten(1).mean(1)
+        # exp of that average is perplexity
         perplexity.append(nll.exp().cpu())
     perplexity = torch.cat(perplexity)
     dist, idx = nearest(samples, train_images)
@@ -332,7 +356,9 @@ def failures():
 def inception_features(net, imgs):
     out = []
     for i in range(0, len(imgs), 32):
+        # inception was trained on 8-bit colour images
         x = (imgs[i:i + 32].float().clamp(0, 1) * 255).round().to(torch.uint8)
+        # a grey slice is copied onto three channels
         out.append(net(x.repeat(1, 3, 1, 1).to(device)).double().cpu())
     return torch.cat(out)
 
@@ -340,6 +366,7 @@ def frechet(a, b):
     a, b = a.numpy(), b.numpy()
     cov_a, cov_b = np.cov(a, rowvar=False), np.cov(b, rowvar=False)
     diff = a.mean(0) - b.mean(0)
+    # squared distance between the means plus the trace term for the two covariances
     return float((diff ** 2).sum() + np.trace(cov_a + cov_b - 2 * np.real(sqrtm(cov_a @ cov_b))))
 
 @torch.no_grad()
@@ -351,6 +378,7 @@ def distribution():
     train = load_split("train")["images"].float()
     test = load_split("test")["images"].float()
     saved = torch.load(os.path.join(res_dir, "samples.pt"), weights_only=False)
+    # pick 2000 training slices
     reference = train[torch.randperm(len(train), generator=torch.Generator().manual_seed(1))[:2000]]
     ref = inception_features(net, reference)
     recon = torch.cat([vq(test[i:i + 32].to(device))[0].cpu() for i in range(0, len(test), 32)])
