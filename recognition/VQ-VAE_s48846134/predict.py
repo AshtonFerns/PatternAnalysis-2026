@@ -147,7 +147,40 @@ def resources():
     }
     json.dump(report, open(os.path.join(res_dir, "resources.json"), "w"), indent=1)
 
+@torch.no_grad()
+def interpolation():
+    os.makedirs(fig_dir, exist_ok=True)
+    vq, _, _ = load("vqvae")
+    vae, _, _ = load("vae")
+    test = load_split("test")
+    images = test["images"].float()
+    a = next(i for i, k in enumerate(test["keys"]) if k[0] == test["keys"][0][0] and k[2] == 30)
+    b = next(i for i, k in enumerate(test["keys"]) if k[0] != test["keys"][0][0] and k[2] == 30)
+    xa, xb = images[a:a + 1].to(device), images[b:b + 1].to(device)
+    steps = torch.linspace(0, 1, 8, device=device)
+    za, zb = vq.encoder(xa), vq.encoder(xb)
+    vq_row = vq.decoder(vq.quantizer(torch.cat([(1 - t) * za + t * zb for t in steps]))[0])
+    ma, mb = vae(xa)[2], vae(xb)[2]
+    vae_row = vae.decode(torch.cat([(1 - t) * ma + t * mb for t in steps]))
+    fig, axes = plt.subplots(2, 10, figsize=(14, 6))
+    for r, (name, seq) in enumerate((("VQ-VAE", vq_row), ("VAE", vae_row))):
+        cols = [xa[0, 0]] + [img[0] for img in seq] + [xb[0, 0]]
+        for c, img in enumerate(cols):
+            axes[r, c].imshow(show(img), cmap="gray", vmin=0, vmax=1)
+            axes[r, c].axis("off")
+            if c == 0:
+                title = "patient A"
+            elif c == 9:
+                title = "patient B"
+            else:
+                title = f"{name} t={steps[c - 1].item():.2f}"
+            axes[r, c].set_title(title, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(fig_dir, "interpolation.png"), dpi=100)
+    plt.close(fig)
+
 if __name__ == "__main__":
     main()
     memorisation()
     resources()
+    interpolation()
